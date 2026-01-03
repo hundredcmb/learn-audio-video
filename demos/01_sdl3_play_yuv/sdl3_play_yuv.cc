@@ -168,7 +168,7 @@ int main() {
         return 1;
     }
 
-    // ffmpeg -i 640x360_25fps.mp4 -pix_fmt yuv420p yuv420p_a.yuv
+    // ffmpeg -i 640x360_25fps.mp4 -pix_fmt yuv420p yuv420p_640x360_25fps.yuv
     const auto yuv_file = "../../../../yuv420p_640x360_25fps.yuv";
 
     // play

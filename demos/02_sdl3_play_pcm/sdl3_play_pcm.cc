@@ -138,8 +138,8 @@ int main() {
         return 1;
     }
 
-    // ffmpeg -i test.mp4 -ar 48000 -ac 2 -f s16le 48000_16bit_2ch.pcm
-    const auto pcm_file = "../../../../48000_16bit_2ch.pcm";
+    // ffmpeg -i test.mp4 -ar 48000 -ac 2 -f s16le 48000hz_s16le_stereo.pcm
+    const auto pcm_file = "../../../../48000hz_s16le_stereo.pcm";
 
     // play
     const bool success = PlayPcmAudio(pcm_file);
