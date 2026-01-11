@@ -1,2 +1,3 @@
 add_subdirectory(01_sdl3_play_yuv)
 add_subdirectory(02_sdl3_play_pcm)
+add_subdirectory(03_ffmpeg_memory)
