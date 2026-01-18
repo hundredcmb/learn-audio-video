@@ -43,37 +43,37 @@ int demultiplex(const char *filename) {
         AVCodecParameters *param = stream->codecpar;
 
         // stream->duration is in stream->time_base units
-        // const double total_seconds = static_cast<double>(stream->duration) * av_q2d(stream->time_base);
-        // printf("%lf\n", av_q2d(stream->time_base));
+        const double total_seconds = static_cast<double>(stream->duration) * av_q2d(stream->time_base);
+        printf("%lf\n", av_q2d(stream->time_base));
 
-        // const int hour_part = static_cast<int>(total_seconds / 3600);
-        // const int minute_part = static_cast<int>((total_seconds - hour_part * 3600) / 60);
-        // const int second_part = static_cast<int>(total_seconds - hour_part * 3600 - minute_part * 60);
-        // const int ms_part = static_cast<int>(std::fmod(total_seconds, 1.0) * 1000);
-        //
-        // const int bit_rate_kb = static_cast<int>(param->bit_rate / 1000);
+        const int hour_part = static_cast<int>(total_seconds / 3600);
+        const int minute_part = static_cast<int>((total_seconds - hour_part * 3600) / 60);
+        const int second_part = static_cast<int>(total_seconds - hour_part * 3600 - minute_part * 60);
+        const int ms_part = static_cast<int>(std::fmod(total_seconds, 1.0) * 1000);
+
+        const int bit_rate_kb = static_cast<int>(param->bit_rate / 1000);
         if (param->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_idx = i;
-            // printf("Stream #0:%d Video: ", video_idx);
-            // const int width = param->width, height = param->height;
-            // const int frame_rate = static_cast<int>(av_q2d(stream->avg_frame_rate));
-            // if (param->codec_id == AV_CODEC_ID_H264) {
-            //     printf("h264, %dx%d, %d kb/s, %d fps, ", width, height, bit_rate_kb, frame_rate);
-            // } else {
-            //     printf("not h264, %dx%d, %d kb/s, %d fps, ", width, height, bit_rate_kb, frame_rate);
-            // }
-            // printf("%d:%d:%d:%d\n", hour_part, minute_part, second_part, ms_part);
+            printf("Stream #0:%d Video: ", video_idx);
+            const int width = param->width, height = param->height;
+            const int frame_rate = static_cast<int>(av_q2d(stream->avg_frame_rate));
+            if (param->codec_id == AV_CODEC_ID_H264) {
+                printf("h264, %dx%d, %d kb/s, %d fps, ", width, height, bit_rate_kb, frame_rate);
+            } else {
+                printf("not h264, %dx%d, %d kb/s, %d fps, ", width, height, bit_rate_kb, frame_rate);
+            }
+            printf("%d:%d:%d:%d\n", hour_part, minute_part, second_part, ms_part);
         } else if (param->codec_type == AVMEDIA_TYPE_AUDIO) {
             audio_idx = i;
-            // printf("Stream #0:%d Audio: ", audio_idx);
-            // const int sample_rate = param->sample_rate;
-            // const int channels = param->ch_layout.nb_channels;
-            // if (param->codec_id == AV_CODEC_ID_AAC) {
-            //     printf("aac, %d Hz, %d channels, %d kb/s, ", sample_rate, channels, bit_rate_kb);
-            // } else {
-            //     printf("not aac, %d Hz, %d channels, %d kb/s, ", sample_rate, channels, bit_rate_kb);
-            // }
-            // printf("%d:%d:%d:%d\n", hour_part, minute_part, second_part, ms_part);
+            printf("Stream #0:%d Audio: ", audio_idx);
+            const int sample_rate = param->sample_rate;
+            const int channels = param->ch_layout.nb_channels;
+            if (param->codec_id == AV_CODEC_ID_AAC) {
+                printf("aac, %d Hz, %d channels, %d kb/s, ", sample_rate, channels, bit_rate_kb);
+            } else {
+                printf("not aac, %d Hz, %d channels, %d kb/s, ", sample_rate, channels, bit_rate_kb);
+            }
+            printf("%d:%d:%d:%d\n", hour_part, minute_part, second_part, ms_part);
         } else {
             printf("Stream #0:%d not video or audio\n", i);
         }
@@ -142,7 +142,7 @@ void test_memory() {
 }
 
 int main() {
-    const char *input_file = "../../../../h264-yuv420p-640x360-25fps.mp4";
+    const char *input_file = "../../../../yuv420p_640x360_25fps.mp4";
     // return dump_format(input_file);
     return demultiplex(input_file);
 }

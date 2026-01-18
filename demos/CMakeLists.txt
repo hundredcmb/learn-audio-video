@@ -1,3 +1,8 @@
 add_subdirectory(01_sdl3_play_yuv)
 add_subdirectory(02_sdl3_play_pcm)
 add_subdirectory(03_ffmpeg_memory)
+add_subdirectory(04_ffmpeg_decode_video)
+add_subdirectory(05_ffmpeg_decode_audio)
+add_subdirectory(06_ffmpeg_audio_resample)
+add_subdirectory(07_ffmpeg_encode_audio)
+add_subdirectory(08_ffmpeg_encode_video)
