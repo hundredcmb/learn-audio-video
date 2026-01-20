@@ -110,7 +110,7 @@ static bool InnerEncodeVideoAVC(AVCodecContext *codec_ctx, AVFrame *frame, std::
         pts += 1;
         frame->pts = pts;
 
-        // encode pcm to aac, write to file
+        // encode video, write to file
         if (!EncodeAndWrite(codec_ctx, frame, pkt, ofs)) {
             ret = false;
             break;
