@@ -30,7 +30,7 @@ static bool EncodeAndWrite(AVCodecContext *codec_ctx, AVFrame *frame, AVPacket *
     }
 
     // receive avc from encoder, until EOF
-    // do not need to manage aac memory
+    // do not need to manage AVPacket memory
     while ((error_code = avcodec_receive_packet(codec_ctx, pkt)) == 0) {
         if (!ofs) {
             continue;

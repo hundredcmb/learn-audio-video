@@ -7,7 +7,6 @@ extern "C" {
 
 thread_local static char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {};
 static constexpr int kDurationSeconds = 10;
-int video_count = 0, audio_count = 0;
 
 static const AVPixelFormat kVideoPixelFormat = AV_PIX_FMT_YUV420P;
 static constexpr int kVideoFrameRate = 25;
@@ -32,11 +31,139 @@ struct OutputStream {
     AVCodecContext *codec_ctx;
     AVFrame *frame;
     AVPacket *packet;
-    int64_t next_pts;
+    int64_t next_codec_pts;
+    std::ifstream ifs;
 };
 
+static int FillYuv420pImage(AVFrame *frame, int frame_index,
+                            int width, int height) {
+    if (!frame || width <= 0 || height <= 0 || frame_index < 0) {
+        return -1;
+    }
+    av_frame_unref(frame);
+
+    int error_code = 0;
+    frame->format = AV_PIX_FMT_YUV420P;
+    frame->width = width;
+    frame->height = height;
+    if ((error_code = av_frame_get_buffer(frame, 0)) < 0) {
+        fprintf(stderr, "Failed to av_frame_get_buffer(): %s\n",
+                ErrorToString(error_code));
+        return error_code;
+    }
+
+    int x, y, i;
+    i = frame_index;
+    /* Y */
+    for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++)
+            frame->data[0][y * frame->linesize[0] + x] = x + y + i * 3;
+
+    /* Cb and Cr */
+    for (y = 0; y < height / 2; y++) {
+        for (x = 0; x < width / 2; x++) {
+            frame->data[1][y * frame->linesize[1] + x] = 128 + y + i * 2;
+            frame->data[2][y * frame->linesize[2] + x] = 64 + x + i * 5;
+        }
+    }
+
+    return 0;
+}
+
+static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx, std::ifstream &ifs) {
+    if (!frame || !codec_ctx || !ifs) {
+        fprintf(stderr, "Invalid argument\n");
+        return -1;
+    }
+    av_frame_unref(frame);
+
+    int error_code = 0;
+    int bytes_per_sample = av_get_bytes_per_sample(codec_ctx->sample_fmt);
+    if (bytes_per_sample <= 0) {
+        fprintf(stderr, "Failed to get bytes per sample\n");
+        return -1;
+    }
+
+    // allocate AVBufferRef[] according to the codec parameters
+    frame->format = codec_ctx->sample_fmt;
+    frame->ch_layout = codec_ctx->ch_layout;
+    frame->nb_samples = codec_ctx->frame_size;
+    frame->sample_rate = codec_ctx->sample_rate;
+    if ((error_code = av_frame_get_buffer(frame, 0)) < 0) {
+        fprintf(stderr, "Failed to allocate AVBufferRef[] in AVFrame: %s\n", ErrorToString(error_code));
+        return error_code;
+    }
+
+    int nb_samples = frame->nb_samples;
+    int nb_channels = frame->ch_layout.nb_channels;
+    AVSampleFormat sample_fmt = codec_ctx->sample_fmt;
+    int bytes_per_frame = bytes_per_sample * nb_channels * nb_samples;
+    auto pcm_buffer_packed = std::make_unique<uint8_t[]>(bytes_per_frame);
+    auto pcm_buffer_planar = std::make_unique<uint8_t[]>(bytes_per_frame);
+
+    // read pcm samples
+    std::memset(pcm_buffer_packed.get(), 0, bytes_per_frame);
+    if (!ifs.read(reinterpret_cast<char *>(pcm_buffer_packed.get()),
+                  bytes_per_frame)) {
+        if (!ifs.eof()) {
+            fprintf(stderr,
+                    "Failed to read input file: ifstream is broken\n");
+            return -1;
+        }
+    }
+    int bytes_read = static_cast<int>(ifs.gcount());
+    int samples_read = bytes_read / bytes_per_sample;
+    int nb_samples_read = samples_read / nb_channels;
+    if (nb_samples_read <= 0) {
+        fprintf(stderr, "Failed to read input file: invalid samples\n");
+        return -1;
+    }
+
+    // convert pcm sample format
+    uint8_t *data = nullptr;
+    if (av_sample_fmt_is_planar(sample_fmt)) {
+        data = pcm_buffer_planar.get();
+        std::memset(data, 0, bytes_per_frame);
+        for (int i = 0; i < nb_channels; ++i) {
+            for (int j = i; j < samples_read; j += nb_channels) {
+                std::memcpy(data,
+                            pcm_buffer_packed.get() + j * bytes_per_sample,
+                            bytes_per_sample);
+                data += bytes_per_sample;
+            }
+        }
+        data = pcm_buffer_planar.get();
+    } else {
+        data = pcm_buffer_packed.get();
+    }
+
+    // initialize AVFrame
+    if ((error_code = av_frame_make_writable(frame)) < 0) {
+        fprintf(stderr, "Failed to make AVFrame writable: %s\n", ErrorToString(error_code));
+        return error_code;
+    }
+    if ((error_code = av_samples_fill_arrays(frame->data, frame->linesize, data, nb_channels, nb_samples_read,
+                                             sample_fmt, 0)) < 0) {
+        fprintf(stderr, "Failed to fill AVFrame data: %s\n", ErrorToString(error_code));
+        return error_code;
+    }
+
+    return nb_samples;
+}
+
 static int WriteVideoFrame(AVFormatContext *fmt_ctx, OutputStream *video_stream) {
-    int compare_ts = av_compare_ts(video_stream->next_pts,
+    if (video_stream->codec_ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
+        fprintf(stderr, "unsupported pixel format\n");
+        return -1;
+    }
+    if (!video_stream->frame || !video_stream->packet) {
+        fprintf(stderr, "frame or packet not alloc\n");
+        return -1;
+    }
+
+    int error_code = 0;
+    static int frame_index = 0;
+    int compare_ts = av_compare_ts(video_stream->next_codec_pts,
                                    video_stream->codec_ctx->time_base,
                                    kDurationSeconds,
                                    AVRational(1, 1));
@@ -44,13 +171,55 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx, OutputStream *video_stream)
         return 1;
     }
 
-    printf("\nwrite_video_frame\n");
-    video_stream->next_pts += 1;
+    error_code = FillYuv420pImage(video_stream->frame, frame_index,
+                                  video_stream->codec_ctx->width,
+                                  video_stream->codec_ctx->height);
+    if (error_code < 0) {
+        return -1;
+    }
+
+    // send video frame to encoder
+    video_stream->frame->pts = video_stream->next_codec_pts;
+    if ((error_code = avcodec_send_frame(video_stream->codec_ctx, video_stream->frame)) < 0) {
+        if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
+            fprintf(stderr, "Failed to send packet to encoder: %s\n", ErrorToString(error_code));
+            return -1;
+        }
+    }
+    printf("\nsend_video_frame: codec_pts=%lld\n", video_stream->frame->pts);
+
+    // receive video packet from encoder
+    while ((error_code = avcodec_receive_packet(video_stream->codec_ctx, video_stream->packet)) == 0) {
+        video_stream->packet->stream_index = video_stream->stream->index;
+
+        // rescale output packet timestamp values from codec to stream timebase
+        av_packet_rescale_ts(video_stream->packet, video_stream->codec_ctx->time_base, video_stream->stream->time_base);
+
+        printf("receive_video_packet: flv_pts=%lld\n", video_stream->packet->pts);
+
+        // write packet to output
+        if ((error_code = av_interleaved_write_frame(fmt_ctx, video_stream->packet)) < 0) {
+            fprintf(stderr, "Failed to write packet to output: %s\n", ErrorToString(error_code));
+            return -1;
+        }
+    }
+    if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
+        fprintf(stderr, "Failed to receive frame from encoder: %s\n", ErrorToString(error_code));
+        return -1;
+    }
+
+    video_stream->next_codec_pts += 1;
+    frame_index += 1;
     return 0;
 }
 
 static int WriteAudioFrame(AVFormatContext *fmt_ctx, OutputStream *audio_stream) {
-    int compare_ts = av_compare_ts(audio_stream->next_pts,
+    if (!audio_stream->frame || !audio_stream->packet) {
+        fprintf(stderr, "frame or packet not alloc\n");
+        return -1;
+    }
+
+    int compare_ts = av_compare_ts(audio_stream->next_codec_pts,
                                    audio_stream->codec_ctx->time_base,
                                    kDurationSeconds,
                                    AVRational(1, 1));
@@ -58,8 +227,43 @@ static int WriteAudioFrame(AVFormatContext *fmt_ctx, OutputStream *audio_stream)
         return 1;
     }
 
-    printf("\nwrite_audio_frame\n");
-    audio_stream->next_pts += 1024;
+    int error_code = 0;
+    int nb_samples = FillPcmSample(audio_stream->frame, audio_stream->codec_ctx, audio_stream->ifs);
+    if (nb_samples < 0) {
+        return -1;
+    }
+
+    // send audio frame to encoder
+    audio_stream->frame->pts = audio_stream->next_codec_pts;
+    printf("\nsend_audio_frame: codec_pts=%lld\n", audio_stream->frame->pts);
+    if ((error_code = avcodec_send_frame(audio_stream->codec_ctx, audio_stream->frame)) < 0) {
+        if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
+            fprintf(stderr, "Failed to send packet to encoder: %s\n", ErrorToString(error_code));
+            return -1;
+        }
+    }
+
+    // receive audio packet from encoder
+    while ((error_code = avcodec_receive_packet(audio_stream->codec_ctx, audio_stream->packet)) == 0) {
+        audio_stream->packet->stream_index = audio_stream->stream->index;
+
+        // rescale output packet timestamp values from codec to stream timebase
+        av_packet_rescale_ts(audio_stream->packet, audio_stream->codec_ctx->time_base, audio_stream->stream->time_base);
+
+        printf("receive_audio_packet: flv_pts=%lld\n", audio_stream->packet->pts);
+
+        // write packet to output
+        if ((error_code = av_interleaved_write_frame(fmt_ctx, audio_stream->packet)) < 0) {
+            fprintf(stderr, "Failed to write packet to output: %s\n", ErrorToString(error_code));
+            return -1;
+        }
+    }
+    if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
+        fprintf(stderr, "Failed to receive frame from encoder: %s\n", ErrorToString(error_code));
+        return -1;
+    }
+
+    audio_stream->next_codec_pts += nb_samples;
     return 0;
 }
 
@@ -79,6 +283,9 @@ static int InnerMultiplexFLV(AVFormatContext *fmt_ctx,
         }
     }
 
+    // write flv header
+    // stream->time_base is changed
+    // flv: audio=(1, 1000), video=(1, 1000); ts: audio=(1, 90000), video=(1, 90000)
     if ((error_code = avformat_write_header(fmt_ctx, nullptr) < 0)) {
         fprintf(stderr, "Failed to avformat_write_header: %s\n",
                 ErrorToString(error_code));
@@ -86,16 +293,20 @@ static int InnerMultiplexFLV(AVFormatContext *fmt_ctx,
     }
 
     while (encode_audio || encode_video) {
-        compare_ts = av_compare_ts(video_stream->next_pts,
+        compare_ts = av_compare_ts(video_stream->next_codec_pts,
                                    video_stream->codec_ctx->time_base,
-                                   audio_stream->next_pts,
+                                   audio_stream->next_codec_pts,
                                    audio_stream->codec_ctx->time_base);
         if (encode_video && (compare_ts <= 0)) {
-            video_count++;
-            encode_video = !WriteVideoFrame(fmt_ctx, video_stream);
+            if ((error_code = WriteVideoFrame(fmt_ctx, video_stream)) < 0) {
+                break;
+            }
+            encode_video = !error_code;
         } else {
-            audio_count++;
-            encode_audio = !WriteAudioFrame(fmt_ctx, audio_stream);
+            if ((error_code = WriteAudioFrame(fmt_ctx, audio_stream)) < 0) {
+                break;
+            }
+            encode_audio = !error_code;
         }
     }
 
@@ -112,7 +323,7 @@ end_mux_flv:
     return error_code;
 }
 
-static int MultiplexFLV(const char *output_file) {
+static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
     int error_code = 0;
     AVFormatContext *fmt_ctx = nullptr;
     OutputStream video_stream{}, audio_stream{};
@@ -236,10 +447,38 @@ static int MultiplexFLV(const char *output_file) {
         goto close_streams;
     }
 
+    // alloc AVPacket
+    audio_stream.packet = av_packet_alloc();
+    if (!audio_stream.packet) {
+        fprintf(stderr, "Failed to allocate audio packet\n");
+        error_code = -1;
+        goto close_streams;
+    }
+    video_stream.packet = av_packet_alloc();
+    if (!video_stream.packet) {
+        fprintf(stderr, "Failed to allocate video packet\n");
+        error_code = -1;
+        goto close_streams;
+    }
+
+    // open input file
+    audio_stream.ifs = std::ifstream(input_pcm_file, std::ios::in | std::ios::binary);
+    if (!audio_stream.ifs.is_open()) {
+        fprintf(stderr, "Failed to open input file: %s\n", input_pcm_file);
+        error_code = -1;
+        goto close_streams;
+    }
+
     av_dump_format(fmt_ctx, 0, output_file, 1);
     error_code = InnerMultiplexFLV(fmt_ctx, &audio_stream, &video_stream);
 
-    close_streams:
+close_streams:
+    if (video_stream.packet) {
+        av_packet_free(&video_stream.packet);
+    }
+    if (audio_stream.packet) {
+        av_packet_free(&audio_stream.packet);
+    }
     if (video_stream.frame) {
         av_frame_free(&video_stream.frame);
     }
@@ -257,5 +496,6 @@ static int MultiplexFLV(const char *output_file) {
 }
 
 int main() {
-    return MultiplexFLV("../../../../output.flv");
+    // ffmpeg -i yuv420p_640x360_25fps.mp4 -ar 48000 -ac 2 -f f32le 48k_f32le_2ch.pcm
+    return MultiplexFLV("../../../../output.flv", "../../../../48k_f32le_2ch.pcm");
 }

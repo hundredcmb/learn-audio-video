@@ -345,7 +345,7 @@ void EncodeAudioAAC(int nb_channels, int sample_rate, AVSampleFormat sample_fmt,
 }
 
 int main() {
-    // ffmpeg -i av.mp4 -ar 48000 -ac 2 -f f32le 48k_f32le_2ch.pcm.pcm
+    // ffmpeg -i yuv420p_640x360_25fps.mp4 -ar 48000 -ac 2 -f f32le 48k_f32le_2ch.pcm
     EncodeAudioAAC(2, 48000, AV_SAMPLE_FMT_FLTP, 128 * 1024, "aac", "../../../../48k_f32le_2ch.pcm", "../../../../48k_f32le_2ch.aac");
     // ffplay 48k_f32le_2ch.aac
     return 0;
