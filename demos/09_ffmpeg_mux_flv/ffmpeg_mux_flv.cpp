@@ -4,6 +4,7 @@ extern "C" {
 }
 
 #include <fstream>
+#include <thread>
 
 thread_local static char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {};
 static constexpr int kDurationSeconds = 10;
@@ -70,7 +71,8 @@ static int FillYuv420pImage(AVFrame *frame, int frame_index,
     return 0;
 }
 
-static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx, std::ifstream &ifs) {
+static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx,
+                         std::ifstream &ifs) {
     if (!frame || !codec_ctx || !ifs) {
         fprintf(stderr, "Invalid argument\n");
         return -1;
@@ -90,7 +92,8 @@ static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx, std::ifstrea
     frame->nb_samples = codec_ctx->frame_size;
     frame->sample_rate = codec_ctx->sample_rate;
     if ((error_code = av_frame_get_buffer(frame, 0)) < 0) {
-        fprintf(stderr, "Failed to allocate AVBufferRef[] in AVFrame: %s\n", ErrorToString(error_code));
+        fprintf(stderr, "Failed to allocate AVBufferRef[] in AVFrame: %s\n",
+                ErrorToString(error_code));
         return error_code;
     }
 
@@ -133,25 +136,21 @@ static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx, std::ifstrea
             }
         }
         data = pcm_buffer_planar.get();
+        for (int i = 0; i < nb_channels; ++i) {
+            std::memcpy(frame->data[i],
+                        data + i * nb_samples_read * bytes_per_sample,
+                        nb_samples_read * bytes_per_sample);
+        }
     } else {
         data = pcm_buffer_packed.get();
-    }
-
-    // initialize AVFrame
-    if ((error_code = av_frame_make_writable(frame)) < 0) {
-        fprintf(stderr, "Failed to make AVFrame writable: %s\n", ErrorToString(error_code));
-        return error_code;
-    }
-    if ((error_code = av_samples_fill_arrays(frame->data, frame->linesize, data, nb_channels, nb_samples_read,
-                                             sample_fmt, 0)) < 0) {
-        fprintf(stderr, "Failed to fill AVFrame data: %s\n", ErrorToString(error_code));
-        return error_code;
+        std::memcpy(frame->data[0], data, bytes_read);
     }
 
     return nb_samples;
 }
 
-static int WriteVideoFrame(AVFormatContext *fmt_ctx, OutputStream *video_stream) {
+static int WriteVideoFrame(AVFormatContext *fmt_ctx,
+                           OutputStream *video_stream) {
     if (video_stream->codec_ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
         fprintf(stderr, "unsupported pixel format\n");
         return -1;
@@ -180,31 +179,41 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx, OutputStream *video_stream)
 
     // send video frame to encoder
     video_stream->frame->pts = video_stream->next_codec_pts;
-    if ((error_code = avcodec_send_frame(video_stream->codec_ctx, video_stream->frame)) < 0) {
+    if ((error_code = avcodec_send_frame(video_stream->codec_ctx,
+                                         video_stream->frame)) < 0) {
         if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
-            fprintf(stderr, "Failed to send packet to encoder: %s\n", ErrorToString(error_code));
+            fprintf(stderr, "Failed to send packet to encoder: %s\n",
+                    ErrorToString(error_code));
             return -1;
         }
     }
     printf("\nsend_video_frame: codec_pts=%lld\n", video_stream->frame->pts);
 
     // receive video packet from encoder
-    while ((error_code = avcodec_receive_packet(video_stream->codec_ctx, video_stream->packet)) == 0) {
+    while ((error_code = avcodec_receive_packet(video_stream->codec_ctx,
+                                                video_stream->packet)) == 0) {
         video_stream->packet->stream_index = video_stream->stream->index;
 
         // rescale output packet timestamp values from codec to stream timebase
-        av_packet_rescale_ts(video_stream->packet, video_stream->codec_ctx->time_base, video_stream->stream->time_base);
+        av_packet_rescale_ts(video_stream->packet,
+                             video_stream->codec_ctx->time_base,
+                             video_stream->stream->time_base);
 
-        printf("receive_video_packet: flv_pts=%lld\n", video_stream->packet->pts);
+        printf("receive_video_packet: flv_pts=%lld\n",
+               video_stream->packet->pts);
 
         // write packet to output
-        if ((error_code = av_interleaved_write_frame(fmt_ctx, video_stream->packet)) < 0) {
-            fprintf(stderr, "Failed to write packet to output: %s\n", ErrorToString(error_code));
+        if ((error_code = av_interleaved_write_frame(fmt_ctx,
+                                                     video_stream->packet)) <
+            0) {
+            fprintf(stderr, "Failed to write packet to output: %s\n",
+                    ErrorToString(error_code));
             return -1;
         }
     }
     if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
-        fprintf(stderr, "Failed to receive frame from encoder: %s\n", ErrorToString(error_code));
+        fprintf(stderr, "Failed to receive frame from encoder: %s\n",
+                ErrorToString(error_code));
         return -1;
     }
 
@@ -213,7 +222,8 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx, OutputStream *video_stream)
     return 0;
 }
 
-static int WriteAudioFrame(AVFormatContext *fmt_ctx, OutputStream *audio_stream) {
+static int WriteAudioFrame(AVFormatContext *fmt_ctx,
+                           OutputStream *audio_stream) {
     if (!audio_stream->frame || !audio_stream->packet) {
         fprintf(stderr, "frame or packet not alloc\n");
         return -1;
@@ -228,38 +238,50 @@ static int WriteAudioFrame(AVFormatContext *fmt_ctx, OutputStream *audio_stream)
     }
 
     int error_code = 0;
-    int nb_samples = FillPcmSample(audio_stream->frame, audio_stream->codec_ctx, audio_stream->ifs);
+    int nb_samples = FillPcmSample(audio_stream->frame, audio_stream->codec_ctx,
+                                   audio_stream->ifs);
     if (nb_samples < 0) {
+        fprintf(stderr, "Failed to FillPcmSample\n");
         return -1;
     }
 
     // send audio frame to encoder
     audio_stream->frame->pts = audio_stream->next_codec_pts;
     printf("\nsend_audio_frame: codec_pts=%lld\n", audio_stream->frame->pts);
-    if ((error_code = avcodec_send_frame(audio_stream->codec_ctx, audio_stream->frame)) < 0) {
+    if ((error_code = avcodec_send_frame(audio_stream->codec_ctx,
+                                         audio_stream->frame)) < 0) {
         if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
-            fprintf(stderr, "Failed to send packet to encoder: %s\n", ErrorToString(error_code));
+            fprintf(stderr, "Failed to send packet to encoder: %s\n",
+                    ErrorToString(error_code));
             return -1;
         }
     }
 
     // receive audio packet from encoder
-    while ((error_code = avcodec_receive_packet(audio_stream->codec_ctx, audio_stream->packet)) == 0) {
+    while ((error_code = avcodec_receive_packet(audio_stream->codec_ctx,
+                                                audio_stream->packet)) == 0) {
         audio_stream->packet->stream_index = audio_stream->stream->index;
 
         // rescale output packet timestamp values from codec to stream timebase
-        av_packet_rescale_ts(audio_stream->packet, audio_stream->codec_ctx->time_base, audio_stream->stream->time_base);
+        av_packet_rescale_ts(audio_stream->packet,
+                             audio_stream->codec_ctx->time_base,
+                             audio_stream->stream->time_base);
 
-        printf("receive_audio_packet: flv_pts=%lld\n", audio_stream->packet->pts);
+        printf("receive_audio_packet: flv_pts=%lld\n",
+               audio_stream->packet->pts);
 
         // write packet to output
-        if ((error_code = av_interleaved_write_frame(fmt_ctx, audio_stream->packet)) < 0) {
-            fprintf(stderr, "Failed to write packet to output: %s\n", ErrorToString(error_code));
+        if ((error_code = av_interleaved_write_frame(fmt_ctx,
+                                                     audio_stream->packet)) <
+            0) {
+            fprintf(stderr, "Failed to write packet to output: %s\n",
+                    ErrorToString(error_code));
             return -1;
         }
     }
     if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
-        fprintf(stderr, "Failed to receive frame from encoder: %s\n", ErrorToString(error_code));
+        fprintf(stderr, "Failed to receive frame from encoder: %s\n",
+                ErrorToString(error_code));
         return -1;
     }
 
@@ -393,6 +415,9 @@ static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
     audio_stream.codec_ctx->sample_rate = kAudioSampleRate;
     audio_stream.codec_ctx->bit_rate = kAudioBitrate;
     audio_stream.stream->time_base = AVRational(1, kAudioSampleRate);
+    audio_stream.stream->duration = av_rescale_q(kDurationSeconds,
+                                                 AVRational(1, 1),
+                                                 audio_stream.stream->time_base);
     if ((error_code = avcodec_open2(audio_stream.codec_ctx, audio_codec,
                                     nullptr)) < 0) {
         fprintf(stderr, "Failed to avcodec_open2: %s\n",
@@ -410,6 +435,9 @@ static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
     video_stream.codec_ctx->pix_fmt = kVideoPixelFormat;
     video_stream.codec_ctx->bit_rate = kVideoBitrate;
     video_stream.stream->time_base = video_stream.codec_ctx->time_base;
+    video_stream.stream->duration = av_rescale_q(kDurationSeconds,
+                                                 AVRational(1, 1),
+                                                 video_stream.stream->time_base);
     if ((error_code = avcodec_open2(video_stream.codec_ctx, video_codec,
                                     nullptr)) < 0) {
         fprintf(stderr, "Failed to avcodec_open2: %s\n",
@@ -462,7 +490,8 @@ static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
     }
 
     // open input file
-    audio_stream.ifs = std::ifstream(input_pcm_file, std::ios::in | std::ios::binary);
+    audio_stream.ifs = std::ifstream(input_pcm_file,
+                                     std::ios::in | std::ios::binary);
     if (!audio_stream.ifs.is_open()) {
         fprintf(stderr, "Failed to open input file: %s\n", input_pcm_file);
         error_code = -1;
@@ -497,5 +526,7 @@ close_streams:
 
 int main() {
     // ffmpeg -i yuv420p_640x360_25fps.mp4 -ar 48000 -ac 2 -f f32le 48k_f32le_2ch.pcm
-    return MultiplexFLV("../../../../output.flv", "../../../../48k_f32le_2ch.pcm");
+    return MultiplexFLV("../../../../output.flv",
+                        "../../../../48k_f32le_2ch.pcm");
+    // ffplay output.flv -autoexit
 }
