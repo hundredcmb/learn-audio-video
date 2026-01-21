@@ -1,5 +1,6 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/imgutils.h>
 #include <libavformat/avformat.h>
 }
 
@@ -33,52 +34,85 @@ struct OutputStream {
     AVPacket *packet;
     int64_t next_codec_pts;
     std::ifstream ifs;
+    std::unique_ptr<uint8_t[]> read_buffer;
+    std::unique_ptr<uint8_t[]> frame_buffer;
 };
 
-static int FillYuv420pImage(AVFrame *frame, int frame_index,
-                            int width, int height) {
-    if (!frame || width <= 0 || height <= 0 || frame_index < 0) {
+static int RefillVideoFrame(OutputStream *v_stream) {
+    if (!v_stream || !v_stream->frame || !v_stream->codec_ctx || !v_stream->ifs) {
+        fprintf(stderr, "Invalid argument\n");
         return -1;
     }
-    av_frame_unref(frame);
 
     int error_code = 0;
-    frame->format = AV_PIX_FMT_YUV420P;
-    frame->width = width;
-    frame->height = height;
+    AVFrame *frame = v_stream->frame;
+    AVCodecContext *codec_ctx = v_stream->codec_ctx;
+    std::ifstream &ifs = v_stream->ifs;
+    std::unique_ptr<uint8_t[]> &read_buffer = v_stream->read_buffer;
+    std::unique_ptr<uint8_t[]> &frame_buffer = v_stream->frame_buffer;
+
+    av_frame_unref(frame);
+
+    // only support yuv420p
+    if (codec_ctx->pix_fmt != AV_PIX_FMT_YUV420P) {
+        fprintf(stderr, "only support yuv420p\n");
+    }
+
+    // allocate AVBufferRef[] according to the codec parameters
+    frame->format = codec_ctx->pix_fmt;
+    frame->width = codec_ctx->width;
+    frame->height = codec_ctx->height;
     if ((error_code = av_frame_get_buffer(frame, 0)) < 0) {
-        fprintf(stderr, "Failed to av_frame_get_buffer(): %s\n",
+        fprintf(stderr, "Failed to allocate AVBufferRef[] in AVFrame: %s\n",
                 ErrorToString(error_code));
         return error_code;
     }
 
-    int x, y, i;
-    i = frame_index;
-    /* Y */
-    for (y = 0; y < height; y++)
-        for (x = 0; x < width; x++)
-            frame->data[0][y * frame->linesize[0] + x] = x + y + i * 3;
+    // allocate read buffer
+    int frame_bytes = av_image_get_buffer_size(codec_ctx->pix_fmt, frame->width, frame->height, 1);
+    if (frame_bytes < 0) {
+        fprintf(stderr, "Failed to get frame buffer size: %s\n", ErrorToString(frame_bytes));
+        return frame_bytes;
+    }
+    read_buffer = std::make_unique<uint8_t[]>(frame_bytes);
 
-    /* Cb and Cr */
-    for (y = 0; y < height / 2; y++) {
-        for (x = 0; x < width / 2; x++) {
-            frame->data[1][y * frame->linesize[1] + x] = 128 + y + i * 2;
-            frame->data[2][y * frame->linesize[2] + x] = 64 + x + i * 5;
+    // read yuv data
+    if (!ifs.read(reinterpret_cast<char *>(read_buffer.get()), frame_bytes)) {
+        if (!ifs.eof()) {
+            fprintf(stderr, "Failed to read input file: ifstream is broken\n");
+            return -1;
         }
     }
+    int bytes_read = static_cast<int>(ifs.gcount());
+    if (bytes_read <= 0) {
+        fprintf(stderr, "Failed to read input file: invalid bytes read\n");
+        return -1;
+    }
+    frame_buffer = std::move(read_buffer);
+
+    // fill AVFrame data
+    av_image_copy_plane(frame->data[0], frame->linesize[0], frame_buffer.get(), frame->linesize[0], frame->width, frame->height);
+    av_image_copy_plane(frame->data[1], frame->linesize[1], frame_buffer.get() + frame->linesize[0] * frame->height, frame->linesize[1], frame->width / 2, frame->height / 2);
+    av_image_copy_plane(frame->data[2], frame->linesize[2], frame_buffer.get() + frame->linesize[0] * frame->height + frame->linesize[1] * frame->height / 2, frame->linesize[2], frame->width / 2, frame->height / 2);
 
     return 0;
 }
 
-static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx,
-                         std::ifstream &ifs) {
-    if (!frame || !codec_ctx || !ifs) {
+static int RefillAudioFrame(OutputStream *a_stream) {
+    if (!a_stream || !a_stream->frame || !a_stream->codec_ctx || !a_stream->ifs) {
         fprintf(stderr, "Invalid argument\n");
         return -1;
     }
-    av_frame_unref(frame);
 
     int error_code = 0;
+    AVFrame *frame = a_stream->frame;
+    AVCodecContext *codec_ctx = a_stream->codec_ctx;
+    std::ifstream &ifs = a_stream->ifs;
+    std::unique_ptr<uint8_t[]> &read_buffer = a_stream->read_buffer;
+    std::unique_ptr<uint8_t[]> &frame_buffer = a_stream->frame_buffer;
+
+    av_frame_unref(frame);
+
     int bytes_per_sample = av_get_bytes_per_sample(codec_ctx->sample_fmt);
     if (bytes_per_sample <= 0) {
         fprintf(stderr, "Failed to get bytes per sample\n");
@@ -100,12 +134,11 @@ static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx,
     int nb_channels = frame->ch_layout.nb_channels;
     AVSampleFormat sample_fmt = codec_ctx->sample_fmt;
     int bytes_per_frame = bytes_per_sample * nb_channels * nb_samples;
-    auto pcm_buffer_packed = std::make_unique<uint8_t[]>(bytes_per_frame);
-    auto pcm_buffer_planar = std::make_unique<uint8_t[]>(bytes_per_frame);
+    read_buffer = std::make_unique<uint8_t[]>(bytes_per_frame);
+    frame_buffer = std::make_unique<uint8_t[]>(bytes_per_frame);
 
     // read pcm samples
-    std::memset(pcm_buffer_packed.get(), 0, bytes_per_frame);
-    if (!ifs.read(reinterpret_cast<char *>(pcm_buffer_packed.get()),
+    if (!ifs.read(reinterpret_cast<char *>(read_buffer.get()),
                   bytes_per_frame)) {
         if (!ifs.eof()) {
             fprintf(stderr,
@@ -121,27 +154,27 @@ static int FillPcmSample(AVFrame *frame, AVCodecContext *codec_ctx,
         return -1;
     }
 
-    // convert pcm sample format
+    // convert pcm sample format, fill AVFrame data
     uint8_t *data = nullptr;
     if (av_sample_fmt_is_planar(sample_fmt)) {
-        data = pcm_buffer_planar.get();
+        data = frame_buffer.get();
         std::memset(data, 0, bytes_per_frame);
         for (int i = 0; i < nb_channels; ++i) {
             for (int j = i; j < samples_read; j += nb_channels) {
                 std::memcpy(data,
-                            pcm_buffer_packed.get() + j * bytes_per_sample,
+                            read_buffer.get() + j * bytes_per_sample,
                             bytes_per_sample);
                 data += bytes_per_sample;
             }
         }
-        data = pcm_buffer_planar.get();
+        data = frame_buffer.get();
         for (int i = 0; i < nb_channels; ++i) {
             std::memcpy(frame->data[i],
                         data + i * nb_samples_read * bytes_per_sample,
                         nb_samples_read * bytes_per_sample);
         }
     } else {
-        data = pcm_buffer_packed.get();
+        data = read_buffer.get();
         std::memcpy(frame->data[0], data, bytes_read);
     }
 
@@ -160,7 +193,6 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx,
     }
 
     int error_code = 0;
-    static int frame_index = 0;
     AVFrame *input_frame = v_stream->frame;
 
     // check duration
@@ -173,10 +205,8 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx,
         input_frame = nullptr;
         printf("\nsend_video_frame: nullptr\n");
     } else {
-        // if stream not end, init video frame
-        error_code = FillYuv420pImage(v_stream->frame, frame_index,
-                                      v_stream->codec_ctx->width,
-                                      v_stream->codec_ctx->height);
+        // if stream not end, refill video frame
+        error_code = RefillVideoFrame(v_stream);
         if (error_code < 0) {
             return -1;
         }
@@ -225,7 +255,6 @@ static int WriteVideoFrame(AVFormatContext *fmt_ctx,
     }
 
     v_stream->next_codec_pts += 1;
-    frame_index += 1;
     return 0;
 }
 
@@ -247,11 +276,10 @@ static int WriteAudioFrame(AVFormatContext *fmt_ctx,
         input_frame = nullptr;
         printf("\nsend_audio_frame: nullptr\n");
     } else {
-        // if stream not end, init audio frame
-        nb_samples = FillPcmSample(a_stream->frame, a_stream->codec_ctx,
-                                   a_stream->ifs);
+        // if stream not end, refill audio frame
+        nb_samples = RefillAudioFrame(a_stream);
         if (nb_samples < 0) {
-            fprintf(stderr, "Failed to FillPcmSample\n");
+            fprintf(stderr, "Failed to RefillAudioFrame\n");
             return -1;
         }
         a_stream->frame->pts = a_stream->next_codec_pts;
@@ -358,7 +386,9 @@ end_mux_flv:
     return error_code;
 }
 
-static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
+static int MultiplexFLV(const char *output_file,
+                        const char *input_yuv_file,
+                        const char *input_pcm_file) {
     int error_code = 0;
     AVFormatContext *fmt_ctx = nullptr;
     OutputStream video_stream{}, audio_stream{};
@@ -506,7 +536,14 @@ static int MultiplexFLV(const char *output_file, const char *input_pcm_file) {
     audio_stream.ifs = std::ifstream(input_pcm_file,
                                      std::ios::in | std::ios::binary);
     if (!audio_stream.ifs.is_open()) {
-        fprintf(stderr, "Failed to open input file: %s\n", input_pcm_file);
+        fprintf(stderr, "Failed to open input_pcm_file: %s\n", input_pcm_file);
+        error_code = -1;
+        goto close_streams;
+    }
+    video_stream.ifs = std::ifstream(input_yuv_file,
+                                     std::ios::in | std::ios::binary);
+    if (!video_stream.ifs.is_open()) {
+        fprintf(stderr, "Failed to open input_yuv_file: %s\n", input_yuv_file);
         error_code = -1;
         goto close_streams;
     }
@@ -539,7 +576,9 @@ close_streams:
 
 int main() {
     // ffmpeg -i yuv420p_640x360_25fps.mp4 -ar 48000 -ac 2 -f f32le 48k_f32le_2ch.pcm
+    // ffmpeg -i yuv420p_640x360_25fps.mp4 -an -c:v rawvideo -pix_fmt yuv420p yuv420p_640x360_25fps.yuv
     return MultiplexFLV("../../../../output.flv",
+                        "../../../../yuv420p_640x360_25fps.yuv",
                         "../../../../48k_f32le_2ch.pcm");
     // ffplay output.flv -autoexit
 }
