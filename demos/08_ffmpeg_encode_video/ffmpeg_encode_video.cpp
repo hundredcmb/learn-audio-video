@@ -22,6 +22,10 @@ static bool EncodeAndWrite(AVCodecContext *codec_ctx, AVFrame *frame, AVPacket *
     int error_code{};
 
     // send yuv frame to encoder
+    if (frame)
+        printf("\nsend_frame: pts=%lld\n", frame->pts);
+    else
+        printf("\nsend_frame: nullptr\n");
     if ((error_code = avcodec_send_frame(codec_ctx, frame)) < 0) {
         if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
             fprintf(stderr, "Failed to send packet to encoder: %s\n", ErrorToString(error_code));
@@ -35,6 +39,7 @@ static bool EncodeAndWrite(AVCodecContext *codec_ctx, AVFrame *frame, AVPacket *
         if (!ofs) {
             continue;
         }
+        printf("receive_packet: pts=%lld\n", pkt->pts);
         ofs.write(reinterpret_cast<char *>(pkt->data), pkt->size);
     }
     if (error_code != AVERROR(EAGAIN) && error_code != AVERROR_EOF) {
@@ -139,7 +144,7 @@ static void EncodeVideoAVC(int width, int height, int frame_rate, int64_t bit_ra
     if (codec == nullptr) {
         fprintf(stderr, "AVCodec '%s' not found, use libx264\n", codec_name);
         codec_name = "libx264";
-        codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+        codec = avcodec_find_encoder_by_name(codec_name);
         if (!codec) {
             fprintf(stderr, "AVCodec '%s' not found\n", codec_name);
             return;
@@ -175,16 +180,31 @@ static void EncodeVideoAVC(int width, int height, int frame_rate, int64_t bit_ra
     codec_ctx->pix_fmt = pixel_format;
     codec_ctx->bit_rate = bit_rate;
 
+    // libx264 options example: for live stream
     // ffmpeg -h encoder=libx264; x264 --fullhelp
-    if (codec->id == AV_CODEC_ID_H264) {
-        if ((error_code = av_opt_set(codec_ctx->priv_data, "preset", "veryslow", 0)) < 0) {
+    if (codec->id == AV_CODEC_ID_H264 && std::strcmp(codec_name, "libx264") == 0) {
+        if ((error_code = av_opt_set(codec_ctx->priv_data, "preset", "ultrafast", 0)) < 0) {
             fprintf(stderr, "Failed to set libx264 --preset: %s\n", ErrorToString(error_code));
         }
         if ((error_code = av_opt_set(codec_ctx->priv_data, "profile", "high", 0)) < 0) {
             fprintf(stderr, "Failed to set libx264 --profile: %s\n", ErrorToString(error_code));
         }
-        if ((error_code = av_opt_set(codec_ctx->priv_data, "tune", "film", 0)) < 0) {
+        if ((error_code = av_opt_set(codec_ctx->priv_data, "tune", "zerolatency", 0)) < 0) {
             fprintf(stderr, "Failed to set libx264 --tune: %s\n", ErrorToString(error_code));
+        }
+    }
+
+    // h264_nvenc options example: for film
+    // ffmpeg -h encoder=h264_nvenc
+    if (codec->id == AV_CODEC_ID_H264 && std::strcmp(codec_name, "h264_nvenc") == 0) {
+        if ((error_code = av_opt_set_int(codec_ctx->priv_data, "preset", 18, 0)) < 0) {
+            fprintf(stderr, "Failed to set h264_nvenc --preset: %s\n", ErrorToString(error_code));
+        }
+        if ((error_code = av_opt_set_int(codec_ctx->priv_data, "profile", 2, 0)) < 0) {
+            fprintf(stderr, "Failed to set h264_nvenc --profile: %s\n", ErrorToString(error_code));
+        }
+        if ((error_code = av_opt_set_int(codec_ctx->priv_data, "tune", 1, 0)) < 0) {
+            fprintf(stderr, "Failed to set h264_nvenc --tune: %s\n", ErrorToString(error_code));
         }
     }
 
@@ -216,8 +236,13 @@ static void EncodeVideoAVC(int width, int height, int frame_rate, int64_t bit_ra
 }
 
 int main() {
+#if 1
+    const char *codec_name = "libx264";
+#else
+    const char *codec_name = "h264_nvenc";
+#endif
     // ffmpeg -i yuv420p_640x360_25fps.mp4 -an -c:v rawvideo -pix_fmt yuv420p yuv420p_640x360_25fps.yuv
-    EncodeVideoAVC(640, 360, 25, 1000000, AV_PIX_FMT_YUV420P, "libx264", "../../../../yuv420p_640x360_25fps.yuv",
+    EncodeVideoAVC(640, 360, 25, 1000000, AV_PIX_FMT_YUV420P, codec_name, "../../../../yuv420p_640x360_25fps.yuv",
                    "../../../../yuv420p_640x360_25fps.h264");
     // ffplay yuv420p_640x360_25fps.h264
     return 0;
