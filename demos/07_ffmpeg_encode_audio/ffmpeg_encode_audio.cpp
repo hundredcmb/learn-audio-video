@@ -9,7 +9,7 @@ extern "C" {
 #include <unordered_map>
 
 static constexpr int ADTS_HEADER_LEN = 7;
-static constexpr int kDefaultProfile = FF_PROFILE_AAC_LOW;
+static constexpr int kDefaultProfile = AV_PROFILE_AAC_LOW;
 thread_local static char error_buffer[AV_ERROR_MAX_STRING_SIZE] = {}; // store FFmpeg error string
 
 static const std::unordered_map<int, int> sampling_frequency_map = {

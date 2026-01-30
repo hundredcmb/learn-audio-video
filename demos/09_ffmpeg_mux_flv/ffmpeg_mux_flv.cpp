@@ -16,7 +16,7 @@ static constexpr int kVideoHeight = 360;
 static constexpr int64_t kVideoBitrate = 1000000;
 
 static const AVSampleFormat kAudioSampleFormat = AV_SAMPLE_FMT_FLTP;
-static constexpr int kAudioProfile = FF_PROFILE_AAC_LOW;
+static constexpr int kAudioProfile = AV_PROFILE_AAC_LOW;
 static constexpr int kAudioChannels = 2;
 static constexpr int kAudioSampleRate = 48000;
 static constexpr int64_t kAudioBitrate = 128 * 1024;

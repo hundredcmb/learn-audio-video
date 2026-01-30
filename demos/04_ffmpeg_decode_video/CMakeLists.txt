@@ -20,7 +20,6 @@ target_link_libraries(${TARGET_NAME} PRIVATE
         avfilter.lib # 音视频滤镜库
         swscale.lib # 图像缩放和格式转换库
         swresample.lib # 音频重采样和格式转换库
-        postproc.lib # 解码后的处理库
 )
 
 if (WIN32)
